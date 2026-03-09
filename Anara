@@ -1,0 +1,161 @@
+import math
+import random
+
+import rclpy
+from rclpy.node import Node
+
+from std_msgs.msg import Int32, String
+from turtlesim.msg import Pose
+from turtlesim.srv import Spawn, SetPen, TeleportAbsolute
+
+
+class SnakeNode(Node):
+    def __init__(self):
+        super().__init__('snake_node')
+
+        self.player_pose = None
+        self.food_pose = None
+        self.food_name = 'food'
+        self.food_exists = False
+        self.food_type = 'normal'
+        self.score = 0
+        self.game_over = False
+
+        self.food_types = {
+            'normal': {'points': 1, 'color': (0, 255, 0)},
+            'gold':   {'points': 3, 'color': (255, 215, 0)},
+            'ruby':   {'points': 5, 'color': (255, 0, 0)},
+        }
+
+        self.create_subscription(Pose, '/turtle1/pose', self.player_pose_callback, 10)
+        self.create_subscription(Pose, '/food/pose', self.food_pose_callback, 10)
+
+        self.score_pub = self.create_publisher(Int32, '/snake/score', 10)
+        self.score_text_pub = self.create_publisher(String, '/snake/score_text', 10)
+
+        self.spawn_client = self.create_client(Spawn, '/spawn')
+        while not self.spawn_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('waiting for /spawn...')
+
+        self.spawn_or_create_food()
+        self.publish_score()
+
+        self.timer = self.create_timer(0.1, self.game_loop)
+
+    def player_pose_callback(self, msg):
+        self.player_pose = msg
+
+    def food_pose_callback(self, msg):
+        self.food_pose = msg
+
+    def publish_score(self):
+        m1 = Int32()
+        m1.data = self.score
+        self.score_pub.publish(m1)
+
+        m2 = String()
+        m2.data = f'Score: {self.score}'
+        self.score_text_pub.publish(m2)
+
+        self.get_logger().info(f'Score: {self.score}')
+
+    def choose_food_type(self):
+        x = random.random()
+        if x < 0.70:
+            return 'normal'
+        elif x < 0.92:
+            return 'gold'
+        return 'ruby'
+
+    def distance(self, p1, p2):
+        return math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
+
+    def wall_collision(self):
+        if self.player_pose is None:
+            return False
+        return (
+            self.player_pose.x < 0.5 or self.player_pose.x > 10.5 or
+            self.player_pose.y < 0.5 or self.player_pose.y > 10.5
+        )
+
+    def set_food_color(self):
+        client = self.create_client(SetPen, f'/{self.food_name}/set_pen')
+        while not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info(f'waiting for /{self.food_name}/set_pen...')
+
+        color = self.food_types[self.food_type]['color']
+        req = SetPen.Request()
+        req.r = color[0]
+        req.g = color[1]
+        req.b = color[2]
+        req.width = 10
+        req.off = 0
+
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self, future)
+
+    def random_food_position(self):
+        return random.uniform(1.0, 10.0), random.uniform(1.0, 10.0)
+
+    def spawn_or_create_food(self):
+        self.food_type = self.choose_food_type()
+
+        if not self.food_exists:
+            x, y = self.random_food_position()
+            req = Spawn.Request()
+            req.x = x
+            req.y = y
+            req.theta = 0.0
+            req.name = self.food_name
+
+            future = self.spawn_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            self.food_exists = True
+        else:
+            self.teleport_food()
+
+        self.set_food_color()
+        self.get_logger().info(f'New food: {self.food_type}')
+
+    def teleport_food(self):
+        client = self.create_client(TeleportAbsolute, f'/{self.food_name}/teleport_absolute')
+        while not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info(f'waiting for /{self.food_name}/teleport_absolute...')
+
+        x, y = self.random_food_position()
+        req = TeleportAbsolute.Request()
+        req.x = x
+        req.y = y
+        req.theta = 0.0
+
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self, future)
+
+    def game_loop(self):
+        if self.game_over:
+            return
+
+        if self.player_pose is None or self.food_pose is None:
+            return
+
+        if self.wall_collision():
+            self.game_over = True
+            self.get_logger().error('GAME OVER: wall collision')
+            return
+
+        if self.distance(self.player_pose, self.food_pose) < 0.8:
+            self.score += self.food_types[self.food_type]['points']
+            self.publish_score()
+            self.spawn_or_create_food()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SnakeNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
