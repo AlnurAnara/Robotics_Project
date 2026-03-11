@@ -1,9 +1,0 @@
-speed = 1.0  # initial speed
-
-
-def adjust_speed():
-    global speed, score
-    if score % 20 == 0 and score > 0:
-        speed += 0.5  # increase speed
-    elif score % 5 == 0 and score < 0:
-        speed = max(1.0, speed - 0.5)  # decrease speed, not less than 1.0
